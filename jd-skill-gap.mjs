@@ -184,7 +184,12 @@ const NON_REQUIREMENT_HEADER_RE = new RegExp(
 
 // `\r?$` is required, not cosmetic: JS treats \r as a line terminator, so `.`
 // cannot consume it and a bare `$` never matches on a CRLF-split line.
-const BULLET_LINE_RE = /^\s*[-*•]\s*(.+)\r?$/;
+//
+// Numbered items count as list items too. Chinese postings (and many others)
+// number their requirements instead of bulleting them: "1、", "1．", "1)",
+// "（1）", "①". An ASCII "1." or "1)" needs whitespace after it, so a figure
+// such as "3.5+ years" is not read as item 3.
+const BULLET_LINE_RE = /^\s*(?:[-*•]|\d{1,2}(?:[.)]\s|[、．）])|[(（]\d{1,2}[)）]|[\u2460-\u2473])\s*(.+)\r?$/;
 
 // Strip markdown STRONG-emphasis markers (`**text**` / `__text__`) so a
 // bolded heading with no `#` at all — "**What We're Looking For**" — still
@@ -282,8 +287,11 @@ function scanJd(jdText) {
       // "Requirements: SQL; dbt; Tableau" puts the whole list on the header
       // line, with no bullets under it. A separator is required so a sentence
       // such as "About you: Curious and kind" is not read as a list.
-      const inline = headerLine.includes(':') ? headerLine.slice(headerLine.indexOf(':') + 1) : '';
-      if (/[;,]/.test(inline)) addSkillTokens(inline, skills);
+      // The full-width colon and the CJK separators (、，；) count the same as
+      // their ASCII forms: "任职要求：Python、Docker".
+      const colon = headerLine.search(/[:：]/);
+      const inline = colon === -1 ? '' : headerLine.slice(colon + 1);
+      if (/[;,、，；]/.test(inline)) addSkillTokens(inline, skills);
       continue;
     }
     if (inRequirementsBlock && line.trim() === '') continue;
@@ -967,6 +975,57 @@ Shipped a support assistant on Llama 3.
   eq('Chinese non-requirement header (工作內容) closes requirement section', zhSkills.includes('RESTful'), false);
 
   eq('Chinese header diagnosis is conclusive', diagnoseExtraction(zhJd, zhSkills), null);
+
+  // Numbered requirement items: Chinese postings number their requirements
+  // ("1、", "1．", "（1）", "①") instead of bulleting them, and English ones use
+  // markdown ordered lists ("1.", "2)"). They were skipped, so a recognized
+  // 任职要求 header still came back no-skill-candidates.
+  const numberedZhJd = `
+任职要求
+1、熟悉 Prompt、Agent、RAG 等基础原理
+2．掌握 Python，了解 Docker；
+（3）熟悉 Kubernetes
+①有 Redis 经验
+`;
+  const numberedZhSkills = extractJdSkills(numberedZhJd);
+  eq(
+    'numbered zh items (1、 2． （3） ①) are read as requirement items',
+    [...numberedZhSkills].sort().join(','),
+    'Agent,Docker,Kubernetes,Prompt,Python,RAG,Redis'
+  );
+  eq('numbered zh items make the run conclusive', diagnoseExtraction(numberedZhJd, numberedZhSkills), null);
+
+  const numberedEnJd = `
+## Requirements
+1. Python and Docker
+2) Kubernetes
+3.5+ years of Terraform
+`;
+  eq(
+    'markdown ordered items are read; "3.5+ years" is not an item marker',
+    [...extractJdSkills(numberedEnJd)].sort().join(','),
+    'Docker,Kubernetes,Python'
+  );
+
+  // Regression: plain bullets still extract exactly as before.
+  eq(
+    'dash bullets under a zh header still extract',
+    [...extractJdSkills('任职要求\n- 熟悉 Prompt, Agent, RAG 等基础原理\n')].sort().join(','),
+    'Agent,Prompt,RAG'
+  );
+
+  // Inline list on the header line, with a full-width colon and CJK separators.
+  eq(
+    'inline zh header list with ： and 、 extracts',
+    [...extractJdSkills('任职要求：Python、Docker、Kubernetes\n')].sort().join(','),
+    'Docker,Kubernetes,Python'
+  );
+  // ...but a full-width-colon sentence with no separator is still not a list.
+  eq(
+    'inline zh header with ： and no separator is not read as a list',
+    extractJdSkills('任职要求：Curious and kind\n').length,
+    0
+  );
 
   console.log(`\njd-skill-gap self-test: ${passed} passed, ${failed} failed`);
   if (failed > 0) process.exit(1);
